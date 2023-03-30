@@ -1,0 +1,842 @@
+---
+title: "Loon Data"
+author: "Thomas Matthews"
+date: "7/7/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(mapview)
+library(auk)
+library(sf)
+library(spData)
+library(units)
+library(stringr)
+library(DescTools)
+library(raster)
+library(tigris)
+library(car)
+```
+
+```{r}
+#some constants 
+
+#date ranges
+month <- 01
+start_date <- 6
+end_date <- 27
+
+# lake index numbers for the GSHHS 2.3.7 Database
+ontario <- 12
+mich_huron_sup <- 2
+erie_stclair <- 10
+quabbin <- 1114
+# wachusett <- COULD NOT FIND, CHECK LEVEL BELOW (L3)
+winnipesaukee <- 746
+sebago <- 1245
+champlain <- 122
+finger <- c(762,927,937,1955,2347,2550,2997)
+```
+
+
+
+
+
+# Overview
+
+
+
+
+These data consists of several million observations on 48 variables detailing observations on the Common Loon, *Gavia immer*, from EBIRD. 
+
+```{r, eval = FALSE}
+# should only have to run this once to create the files. 
+
+#for cardinal
+f_car <- file.path("/Users/thomasmatthews/Loon/ebd_norcar_relNov-2022/ebd_norcar_relNov-2022.txt")
+filters_car <- auk_ebd(file = f_car) %>%
+  auk_species("Northern Cardinal")%>%
+  auk_country(c("CA","US")) %>%
+  auk_date(c("*-01-06","*-01-27"))
+ebd_filters_car <- auk_filter(filters_car, file = "jan_only_norcar.txt")
+
+#for loons
+f_loo <- file.path("/Users/thomasmatthews/Loon/ebd_comloo_relAug-2022/ebd_comloo_relAug-2022.txt")
+filters_loo <- auk_ebd(file = f_loo) %>%
+  auk_species("Common Loon")%>%
+  auk_country(c("CA","US")) %>%
+  auk_date(c("*-01-06","*-01-27"))
+ebd_filters_loo <- auk_filter(filters_loo, file = "jan_only_comloo.txt")
+```
+
+```{r}
+dfc <- read_ebd("jan_only_norcar.txt")
+
+df <- read_ebd("jan_only_comloo.txt")
+```
+
+
+Separate the observation date variable into three new columns, the year, month and day. 
+```{r}
+df$observation_year <- as.integer(format(as.Date(df$observation_date, format = "%Y-%m-%d"),"%Y"))
+df$observation_month <- as.integer(format(as.Date(df$observation_date, format = "%Y-%m-%d"),"%m"))
+df$observation_day <- as.integer(format(as.Date(df$observation_date, format = "%Y-%m-%d"),"%d"))
+
+dfc$observation_year <- as.integer(format(as.Date(dfc$observation_date, format = "%Y-%m-%d"),"%Y"))
+dfc$observation_month <- as.integer(format(as.Date(dfc$observation_date, format = "%Y-%m-%d"),"%m"))
+dfc$observation_day <- as.integer(format(as.Date(dfc$observation_date, format = "%Y-%m-%d"),"%d"))
+
+#str(df)
+```
+
+Currently, this is filtering all observations to only those in countries of the US and Canada, and within the 21 day period from January 6th to January 27, inclusive. The data should already be in this form, but this remains if the data were loaded in their entirety. 
+```{r}
+df1 <- df %>%
+  filter(country_code == 'US'| country_code== 'CA') %>%
+  filter(observation_month == month) %>%
+  filter(observation_day >= start_date & observation_day <= end_date)
+```
+
+Creating a grouped year variable. 
+```{r, fig.height = 5, fig.width = 12}
+grouped_year <- rep(NA,nrow(df1)) 
+grouped_year[(which(df1$observation_year == 1998 | df1$observation_year == 1999 | df1$observation_year == 2000))] <- "1998-2000"
+grouped_year[(which(df1$observation_year == 2008 | df1$observation_year == 2009 | df1$observation_year == 2010))] <- "2008-2010"
+grouped_year[(which(df1$observation_year == 2018 | df1$observation_year == 2019 | df1$observation_year == 2020))] <- "2018-2020"
+
+df1$grouped_year <- as.factor(grouped_year)
+```
+
+
+
+
+
+# Mapview
+
+
+
+
+
+```{r}
+# read in the geo data
+geo_data <- read_sf("/Users/thomasmatthews/Loon/gshhg-shp-2.3.7/GSHHS_shp/h/GSHHS_h_L1.shp")
+st_crs(geo_data) <- 4326
+
+# create buffer
+north <- geo_data[[7]][4]
+tmp <- st_transform(north, crs = 3857)
+buff <- st_buffer(tmp, dist = -7500)
+hell <- st_transform(buff, crs = 4326)
+
+# make sf object from EBird data
+pts <- st_as_sf(df1, coords = c(29,28), crs=4326)
+ptsc <- st_as_sf(dfc, coords = c(29,28), crs=4326)
+
+# compute buffer
+ii <- !is.na(as.numeric(st_intersects(pts, hell)))
+iic <- !is.na(as.numeric(st_intersects(ptsc, hell)))
+
+# make df tag
+is_ocean <- !ii
+is_oceanc <- !iic
+
+#table(is_ocean, useNA = 'always')
+df1$is_ocean <- is_ocean
+dfc$is_ocean <- is_oceanc
+```
+
+```{r}
+geo_lake_data <- read_sf("/Users/thomasmatthews/Loon/gshhg-shp-2.3.7/GSHHS_shp/h/GSHHS_h_L2.shp")
+st_crs(geo_lake_data) <- 4326
+
+lake_boxes <- data.frame(xmin = rep(NA,nrow(geo_lake_data)), xmax = rep(NA,nrow(geo_lake_data)), ymin = rep(NA,nrow(geo_lake_data)), ymax = rep(NA,nrow(geo_lake_data)))
+for (i in 1:nrow(geo_lake_data)) {
+  lake_boxes[i,1] <- unname(st_bbox(geo_lake_data[[7]][i])[1])
+  lake_boxes[i,2] <- unname(st_bbox(geo_lake_data[[7]][i])[3])
+  lake_boxes[i,3] <- unname(st_bbox(geo_lake_data[[7]][i])[2])
+  lake_boxes[i,4] <- unname(st_bbox(geo_lake_data[[7]][i])[4])
+}
+```
+
+
+```{r}
+#A few sandbox graphing statements to visualise specific gemotries. 
+plot(geo_lake_data[[7]][which(lake_boxes$xmin > -79 & lake_boxes$xmax < -75 & lake_boxes$ymin > 41 & lake_boxes$ymax < 44)])
+plot(geo_lake_data[[7]][12])
+
+mapview(geo_lake_data[[7]][which(lake_boxes$xmin > -78 & lake_boxes$xmax < -75 & lake_boxes$ymin > 41 & lake_boxes$ymax < 44)], crs = 4326, grid = FALSE)
+
+mapview(geo_lake_data[[7]][ontario], crs = 4326) 
+```
+
+```{r}
+
+lk_ontario <- geo_lake_data[[7]][12]
+lk_mich_huron_sup <- geo_lake_data[[7]][2]
+lk_erie_stclair <- geo_lake_data[[7]][10]
+lk_quabbin <- geo_lake_data[[7]][1114]
+# lk_wachusett <- COULD NOT FIND, CHECK LEVEL BELOW (L3)
+lk_winnipesaukee <- geo_lake_data[[7]][746]
+lk_sebago <- geo_lake_data[[7]][1245]
+lk_champlain <- geo_lake_data[[7]][122]
+lk_finger <- geo_lake_data[[7]][c(762,927,937,1955,2347,2550,2997)]
+
+# create buffer
+tmp1 <- st_transform(lk_ontario, crs = 3857)
+tmp2 <- st_transform(lk_mich_huron_sup, crs = 3857)
+tmp3 <- st_transform(lk_erie_stclair, crs = 3857)
+tmp4 <- st_transform(lk_quabbin, crs = 3857)
+tmp5 <- st_transform(lk_winnipesaukee, crs = 3857)
+tmp6 <- st_transform(lk_sebago, crs = 3857)
+tmp7 <- st_transform(lk_champlain, crs = 3857)
+tmp8 <- st_transform(lk_finger, crs = 3857)
+
+lake_buff_dist <- 7500
+
+buff1 <- st_buffer(tmp1, dist = lake_buff_dist)
+buff2 <- st_buffer(tmp2, dist = lake_buff_dist)
+buff3 <- st_buffer(tmp3, dist = lake_buff_dist)
+buff4 <- st_buffer(tmp4, dist = lake_buff_dist)
+buff5 <- st_buffer(tmp5, dist = lake_buff_dist)
+buff6 <- st_buffer(tmp6, dist = lake_buff_dist)
+buff7 <- st_buffer(tmp7, dist = lake_buff_dist)
+buff8 <- st_buffer(tmp8, dist = lake_buff_dist)
+
+t1 <- st_transform(buff1, crs = 4326)
+t2 <- st_transform(buff2, crs = 4326)
+t3 <- st_transform(buff3, crs = 4326)
+t4 <- st_transform(buff4, crs = 4326)
+t5 <- st_transform(buff5, crs = 4326)
+t6 <- st_transform(buff6, crs = 4326)
+t7 <- st_transform(buff7, crs = 4326)
+t8 <- st_transform(buff8, crs = 4326)
+
+# compute buffers
+ii1 <- !is.na(as.numeric(st_intersects(pts, t1)))
+ii2 <- !is.na(as.numeric(st_intersects(pts, t2)))
+ii3 <- !is.na(as.numeric(st_intersects(pts, t3)))
+ii4 <- !is.na(as.numeric(st_intersects(pts, t4)))
+ii5 <- !is.na(as.numeric(st_intersects(pts, t5)))
+ii6 <- !is.na(as.numeric(st_intersects(pts, t6)))
+ii7 <- !is.na(as.numeric(st_intersects(pts, t7)))
+ii8 <- !is.na(as.numeric(st_intersects(pts, t8)))
+
+
+# make df tag
+is_ontario <- ii1
+is_mich_huron_sup <- ii2
+is_erie_stclair <- ii3
+is_quabbin <- ii4
+# is_wachusett <- COULD NOT FIND, CHECK LEVEL BELOW (L3)
+is_winnipesaukee <- ii5
+is_sebago <- ii6
+is_champlain <- ii7
+is_finger <- ii8
+
+df1$is_ontario <- is_ontario
+df1$is_mich_huron_sup <- is_mich_huron_sup
+df1$is_erie_stclair <- is_erie_stclair
+df1$is_quabbin <- is_quabbin
+df1$is_winnipesaukee <- is_winnipesaukee
+df1$is_sebago <- is_sebago
+df1$is_champlain <- is_champlain
+df1$is_finger <- is_finger
+```
+
+```{r}
+df1_land <- df1 %>%
+  filter(is_ocean == FALSE)
+
+df1_ocean <- df1 %>%
+  filter(is_ocean == TRUE)
+```
+
+```{r}
+#mapview(buff, crs = 4326, grid = FALSE)
+
+test <- df1_land %>%
+  filter(is_ontario == TRUE) %>%
+  filter(observation_year > 2004) %>%
+  group_by(observation_year) %>%
+  summarise(n = n()) %>%
+  ggplot(aes(x = observation_year, y = n)) + geom_col() -> gg1
+
+gg1
+
+mapview(t1, crs = 4326, grid = FALSE) 
+
+mapview(test,"longitude","latitude", crs = 4326, grid = FALSE, zcol = "observation_year")
+
+mapview(buff, crs = 4326, grid = FALSE)
+```
+
+
+
+
+
+# Regions
+
+
+
+
+
+```{r}
+# arbitrarily defined state groupings
+new_england <- c("Maine","Massachusetts","Vermont","Connecticut","New York","New Hampshire")
+south_east <- c("North Carolina","South Carolina","Tennessee","Alabama","Mississippi","Georgia","Florida")
+mid_atlantic <- c("Pennsylvania","New Jersey","Delaware","Maryland","West Virginia","Virginia","Rhode Island")
+great_lakes <- c("Illinois","Kentucky","Michigan","Ohio","Indiana","Wisconsin","Minnesota","Iowa","Missouri")
+north_central <- c("Montana","Colorado","North Dakota","South Dakota","Nebraska","Wyoming","Kansas")
+south_central <- c("Texas","Oklahoma","Arkansas","Louisiana","New Mexico")
+south_west <- c("Arizona","California","Nevada","Utah")
+north_west <- c("Washington","Oregon","Idaho")
+```
+
+Created a data-frame for each of the defined regions. These will only be in the US, no observations from Canada.
+```{r}
+df_NE <- df1 %>%
+  filter(state %in% new_england)
+df_SE <- df1 %>%
+  filter(state %in% south_east)
+df_MA <- df1 %>%
+  filter(state %in% mid_atlantic)
+df_GL <- df1 %>%
+  filter(state %in% great_lakes)
+df_NC <- df1 %>%
+  filter(state %in% north_central)
+df_SC <- df1 %>%
+  filter(state %in% south_central)
+df_SW <- df1 %>%
+  filter(state %in% south_west)
+df_NW <- df1 %>%
+  filter(state %in% north_west)
+```
+
+
+
+
+
+# Summary Statistics and Overview
+
+
+
+
+
+The year of observation presents some interesting data, as there are a number of observation which pre-date the internet itself. Presumably, these are manually entered records based on historical observations, but more information would be helpful to be more certain.
+```{r}
+#table(df1$observation_year, useNA = 'always')
+
+gg1 <- ggplot(data = df1, aes(x = observation_year)) + geom_histogram(fill = 'light blue') + labs(title = "Histogram of Observation Year", x = 'Observation Year', y = 'Count')
+gg1
+
+df1 %>%
+  filter(observation_year >= 2000) %>%
+  ggplot(aes(x = observation_year)) + geom_bar(fill = "light blue") + labs(title = "Total Observations from Jan 6 to Jan 27 by Year", x = 'Observation Year', y = 'Count') -> gg2
+gg2
+
+```
+Is the data normal wrt latitude? No. 
+```{r}
+qqnorm(df1$latitude)
+qqline(df1$latitude)
+```
+
+
+
+
+
+
+# Examining Variance
+
+
+
+
+
+This chart shows land only birds, and plots the number of high end outliers by year. 
+```{r}
+df1_land %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(outs = sum(latitude > (1.5*IQR(latitude)) + quantile(latitude)[4])) %>%
+  ggplot(aes(x = observation_year, y = outs)) + geom_col() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(x = "Observation Year", y = "# of Outliers", title = "Outliers by year, all points, land only.", caption = "Only measuring the high end outliers, determined using 1.5*IQR + upper quartile. Right of the blue line denotes post eBird launch.")
+```
+This is the same graphs for New England, and the great lakes. 
+```{r}
+df_NE %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(outs = sum(latitude > (1.5*IQR(latitude)) + quantile(latitude)[4])) %>%
+  ggplot(aes(x = observation_year, y = outs)) + geom_col() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(x = "Observation Year", y = "# of Outliers", title = "Outliers by year, NE, land only.", caption = "Only measuring the high end outliers, determined using 1.5*IQR + upper quartile. Right of the blue line denotes post eBird launch.")
+
+df_GL %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(outs = sum(latitude > (1.5*IQR(latitude)) + quantile(latitude)[4])) %>%
+  ggplot(aes(x = observation_year, y = outs)) + geom_col() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(x = "Observation Year", y = "# of Outliers", title = "Outliers by year, GL, land only.", caption = "Only measuring the high end outliers, determined using 1.5*IQR + upper quartile. Right of the blue line denotes post eBird launch.")
+```
+This chart shows the top 25 observations from years with more than 50 records, and plots a box-plot. 
+```{r}
+df_top <- df1 %>%
+  filter(observation_year >1983) %>%
+  arrange(desc(latitude)) %>%
+  group_by(observation_year) %>%
+  mutate(count = n()) %>%
+  filter(count > 50) %>%
+  slice(1:25)
+
+ggplot(data = df_top, aes(x = observation_year, y = latitude, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "Top 25", x = "Observation Year", y = "Latitude", caption = "Top 25 values for each year with more than 50 records. Right of the blue line denotes post eBird launch.")
+```
+```{r}
+df1_land %>%
+  filter(observation_year > 2000) %>%
+  ggplot(aes(latitude)) + geom_histogram() + facet_wrap(~ observation_year)
+
+df1_land %>%
+  filter(!is.na(grouped_year)) %>%
+  ggplot(aes(latitude, color = as.integer(grouped_year), group = grouped_year)) + geom_density() + scale_colour_gradient(name = "grouped_year", low = "blue", high = "red")
+
+df1_land %>%
+  filter(observation_year >= 1990) %>%
+  filter(longitude >= -100) %>%
+  ggplot(aes(latitude, color = as.integer(observation_year), group = observation_year)) + geom_density() + scale_colour_gradient(name = "observation_year", low = "red", high = "blue")
+
+df1_land %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(top90 = latitude[latitude>=quantile(latitude, 0.90)]) %>%
+  ggplot(aes(top90, color = as.integer(observation_year), group = observation_year)) + geom_density() + scale_colour_gradient(name = "observation_year", low = "light blue", high = "blue")
+
+df1_land %>%
+  filter(observation_year >1997) %>%
+  filter(latitude < 53) %>%
+  arrange(desc(latitude)) %>%
+  group_by(observation_year) %>%
+  mutate(count = n()) %>%
+  filter(count > 50) %>%
+  slice(1:25) %>%
+  ggplot(aes(latitude, color = as.integer(observation_year), group = observation_year)) + geom_density() + scale_colour_gradient(name = "observation_year", low = "red", high = "blue")
+
+df_NE %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year == 2000 | observation_year == 2011 | observation_year == 2022) %>%
+  ggplot(aes(latitude, color = as.integer(observation_year), group = observation_year)) + geom_density() + scale_colour_gradient(name = "Observation Year", low = "light blue", high = "blue") + labs(x = "Latitude", y = "Density", title = "Density of Loon Observation By Latitude in New England (Land Only)")
+  
+```
+
+
+```{r}
+df_top <- df1_land %>%
+  filter(observation_year >1997) %>%
+  filter(longitude >= -100) %>%
+  arrange(desc(latitude)) %>%
+  group_by(observation_year) %>%
+  mutate(count = n()) %>%
+  filter(count > 50) %>%
+  slice(1:25)
+
+ggplot(data = df_top, aes(x = observation_year, y = latitude, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "Top 25", x = "Observation Year", y = "Latitude", caption = "Top 25 values for each year with more than 50 records. Right of the blue line denotes post eBird launch.")
+```
+
+This chart does the same as above, only with cardinals as well. 
+```{r}
+df_topc <- dfc %>%
+  filter(observation_year >1997) %>%
+  arrange(desc(latitude)) %>%
+  group_by(observation_year) %>%
+  mutate(count = n()) %>%
+  filter(count > 50) %>%
+  slice(1:25)
+
+df_topc <- rbind(df_top,df_topc)
+
+df_topc$observation_year <- as.factor(df_topc$observation_year)
+
+test <- df_topc %>%
+  dplyr::select(observation_year,latitude,common_name)
+
+```
+
+```{r, fig.height=6, fig.width=9}
+ggplot(data = test, aes(x = observation_year, y = latitude, color = common_name)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "Top 25", x = "Observation Year", y = "Latitude", caption = "Top 25 values for each year with more than 50 records. Right of the blue line denotes post eBird launch.")
+```
+
+
+
+This chart shows the >90th percentile of value after 2000, and plots a box-plot by year. 
+```{r}
+df1_land %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(top90 = latitude[latitude>=quantile(latitude, 0.90)]) %>%
+  ggplot(aes(x = observation_year, y = top90, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "90th percentile and above, all points.", x = "Observation Year", y = "Latitude", caption = "Distribution of points at or above the 90th percentile, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+```
+
+This chart shows the same >90th percentile of value after 2000, for New England and for the GL region. 
+```{r}
+df_NE %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(top90 = latitude[latitude>=quantile(latitude, 0.90)]) %>%
+  ggplot(aes(x = observation_year, y = top90, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "90th percentile and above, NE.", x = "Observation Year", y = "Latitude", caption = "Distribution of points at or above the 90th percentile, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+
+df_GL %>%
+  filter(observation_year >= 2000) %>%
+  group_by(observation_year) %>%
+  summarise(top90 = latitude[latitude>=quantile(latitude, 0.90)]) %>%
+  ggplot(aes(x = observation_year, y = top90, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "90th percentile and above, GL.", x = "Observation Year", y = "Latitude", caption = "Distribution of points at or above the 90th percentile, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+```
+
+This chart shows the value more the 3*SD and makes a box plot by year for all points. 
+```{r}
+df1_land %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, all points.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+```
+
+This chart shows the value more the 3*SD and makes a box plot by year for NE and GL. 
+```{r}
+df_NE %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, NE.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+
+df_GL %>%
+  filter(is_ocean == FALSE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, GL.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+```
+Looking at the >3 SD for the lakes value for 
+```{r}
+df1 %>%
+  filter(is_ontario == TRUE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, onatario.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+
+df1 %>%
+  filter(is_mich_huron_sup == TRUE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, michigan/huron/superior.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+
+df1 %>%
+  filter(is_erie_stclair == TRUE) %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  mutate(SD = sd(latitude)) %>%
+  summarise(h = latitude[latitude >= 3*SD]) %>%
+  ggplot(aes(x = observation_year, y = h, group = observation_year)) + geom_boxplot() + geom_vline(xintercept = 2002.5, color = "light blue") + labs(title = "SD > 3, erie/stclair.", x = "Observation Year", y = "Latitude", caption = "Distribution of points more than 3 SD from mean, only for years 2000 and later. Right of the blue line denotes post eBird launch.")
+```
+```{r}
+df1_land %>%
+  filter(observation_year > 2000) %>%
+  group_by(observation_year) %>%
+  summarise(var = var(latitude)) %>%
+  ggplot(aes(x = observation_year, y = var)) + geom_point() + geom_vline(xintercept = 2002.5, color = "light blue")
+```
+
+
+
+
+# Statistical Tests
+
+
+
+
+We can test if there is a statistically significant difference between any of these three time periods using a one way ANOVA. 
+```{r}
+
+anova_df <- df_NE %>%
+  filter(is_ocean == FALSE) %>%
+  filter(!is.na(grouped_year))
+
+int1 <- data.frame('latitude' = anova_df$latitude[anova_df$grouped_year == '1998-2000'], 'grouped_year' = rep('1998-2000', length(anova_df$latitude[anova_df$grouped_year == '1998-2000'])))
+
+int2 <- data.frame('latitude' = anova_df$latitude[anova_df$grouped_year == '2008-2010'], 'grouped_year' = rep('2008-2010', length(anova_df$latitude[anova_df$grouped_year == '2008-2010'])))
+
+int3 <- data.frame('latitude' = anova_df$latitude[anova_df$grouped_year == '2018-2020'], 'grouped_year' = rep('2018-2020', length(anova_df$latitude[anova_df$grouped_year == '2018-2020'])))
+
+intervals <- rbind(int1,int2,int3)
+intervals$grouped_year <- as.factor(intervals$grouped_year)
+
+anova <- aov(latitude ~ grouped_year, data = intervals)
+summary(anova)
+
+```
+
+
+This shows that at the $\alpha = 0.05$ significance level we reject the null that there is no difference between the three time period. To determine which level is different, we can perform a Scheffe Test. 
+```{r}
+ScheffeTest(anova)
+```
+
+The result of this shows that there is a difference between the means of 2009 and 1999, as well as 1999 and 2019, but not 2009 and 2019. The means of these years are: 
+```{r}
+anova_df %>%
+  group_by(grouped_year) %>%
+  summarise(mean = mean(latitude))
+```
+
+
+
+
+
+# New ideas/Sandbox
+
+
+
+
+
+```{r}
+df_NE1 <- df1 %>%
+  filter(longitude <= -66.95 & longitude >= -79.59)
+
+df_NE1_land <- df1_land %>%
+  filter(longitude <= -66.95 & longitude >= -79.59)
+
+df_2 <- df1 %>%
+  filter(longitude <= -120 & longitude >= -160)
+
+table(df1$country)
+
+mapview(df_NE1,"longitude","latitude", crs = 4326, grid = FALSE, cex = 4)
+
+mapview(df_NE1_land,"longitude","latitude", crs = 4326, grid = FALSE, cex = 4)
+
+mapview(df,"longitude","latitude", crs = 4326, grid = FALSE, cex = 4)
+```
+
+# Appendix/Assorted visuals/Unfinished ideas
+
+
+```{r}
+grp1 <- df1_land %>%
+  filter(observation_year >= 2002 & observation_year <= 2011)
+
+grp2 <- df1_land %>%
+  filter(observation_year >= 2012 & observation_year <= 2022)
+
+LeveneTest( c(grp1$latitude, grp2$latitude),
+  factor(c(rep("grp1",length(grp1$latitude)), rep("grp2",length(grp2$latitude)))))
+
+median(grp1$latitude)
+
+median(grp2$latitude)
+
+grp2 %>%
+  summarise(highouts = sum(latitude > (1.5*IQR(latitude)) + quantile(latitude)[4]), lowouts = sum(latitude < (1.5*IQR(latitude)) - quantile(latitude)[2]))
+```
+
+
+
+
+
+This code generates a graph of north america, where the data is broken into 30 columns by longitude, the mean is calculated for each, and finally a line connects the columns to provide a rough indicator of the mean latitude across different longitudes of the country. This is done for the three grouped years. 
+```{r}
+# first group
+test1 <- df1 %>%
+  filter(grouped_year == "1998-2000")
+
+
+
+bins1 <- cut_number(test1$longitude, n = 30)
+
+combo1 <- data.frame(test1$longitude, test1$latitude, bins1)
+tmp_lat1 <- combo1 %>%
+  group_by(bins1) %>%
+  summarise(mean_lat = mean(test1.latitude))
+
+lats <- tmp_lat1$mean_lat
+
+longs <- rep(0,length(levels(bins1)))
+for (i in 1:length(levels(bins1))) {
+  longs[i] <- mean(as.numeric(str_extract_all(levels(bins1), "-[0-9.]+")[[i]]))
+}
+
+lat1 <- lats[-30]
+lat2 <- lats[-1]
+long1 <- longs[-30]
+long2 <- longs[-1]
+
+`1998-2000` <- data.frame(long1,lat1,long2,lat2)
+
+`1998-2000`$geom = sprintf("LINESTRING(%s %s, %s %s)", `1998-2000`$long1, `1998-2000`$lat1, `1998-2000`$long2, `1998-2000`$lat2)
+`1998-2000` = st_as_sf(`1998-2000`, wkt = "geom")
+st_crs(`1998-2000`) <- 4326
+
+
+
+# second group
+test2 <- df1 %>%
+  filter(grouped_year == "2008-2010")
+
+bins2 <- cut_number(test2$longitude, n = 30)
+
+combo2 <- data.frame(test2$longitude, test2$latitude, bins2)
+tmp_lat2 <- combo2 %>%
+  group_by(bins2) %>%
+  summarise(mean_lat = mean(test2.latitude))
+
+lats <- tmp_lat2$mean_lat
+
+longs <- rep(0,length(levels(bins2)))
+for (i in 1:length(levels(bins2))) {
+  longs[i] <- mean(as.numeric(str_extract_all(levels(bins2), "-[0-9.]+")[[i]]))
+}
+
+lat1 <- lats[-30]
+lat2 <- lats[-1]
+long1 <- longs[-30]
+long2 <- longs[-1]
+
+`2008-2010` <- data.frame(long1,lat1,long2,lat2)
+
+`2008-2010`$geom = sprintf("LINESTRING(%s %s, %s %s)", `2008-2010`$long1, `2008-2010`$lat1, `2008-2010`$long2, `2008-2010`$lat2)
+`2008-2010` = st_as_sf(`2008-2010`, wkt = "geom")
+st_crs(`2008-2010`) <- 4326
+
+
+# third group
+
+test3 <- df1 %>%
+  filter(grouped_year == "2018-2020")
+
+bins3 <- cut_number(test3$longitude, n = 30)
+
+combo3 <- data.frame(test3$longitude, test3$latitude, bins3)
+tmp_lat3 <- combo3 %>%
+  group_by(bins3) %>%
+  summarise(mean_lat = mean(test3.latitude))
+
+lats <- tmp_lat3$mean_lat
+
+longs <- rep(0,length(levels(bins3)))
+for (i in 1:length(levels(bins3))) {
+  longs[i] <- mean(as.numeric(str_extract_all(levels(bins3), "-[0-9.]+")[[i]]))
+}
+
+lat1 <- lats[-30]
+lat2 <- lats[-1]
+long1 <- longs[-30]
+long2 <- longs[-1]
+
+`2018-2020` <- data.frame(long1,lat1,long2,lat2)
+
+`2018-2020`$geom = sprintf("LINESTRING(%s %s, %s %s)", `2018-2020`$long1, `2018-2020`$lat1, `2018-2020`$long2, `2018-2020`$lat2)
+`2018-2020` = st_as_sf(`2018-2020`, wkt = "geom")
+st_crs(`2018-2020`) <- 4326
+```
+
+Plotting the lines. 
+```{r}
+mapview(`1998-2000`, color = 'cyan') + mapview(`2008-2010`, color = 'blue') + mapview(`2018-2020`, color = 'purple')
+```
+
+This is New England, non-ocean birds displayed where color is observation year. 
+```{r}
+land_NE <- df_NE %>%
+  filter(is_ocean == FALSE)
+mapview(df_NE,"longitude","latitude", crs = 4326, grid = FALSE, zcol = "observation_year")
+```
+
+This plot shows the overall mean latitude per year (for years with more than 20 observations). 
+```{r}
+df3 <- df1 %>%
+  group_by(observation_year) %>%
+  mutate(COUNT = n()) %>%
+  filter(COUNT >= 20) %>%
+  summarise(mean_latitude = mean(latitude)) %>%
+  ggplot(aes(x = observation_year, y = mean_latitude)) + geom_line() -> gg3
+gg3
+```
+
+This plot shows grouped year, New England, non-ocean boxplots of latitude. 
+```{r}
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  ggplot(aes(x = grouped_year, y = latitude, color = grouped_year)) + geom_boxplot() + labs(title = "New England")
+```
+
+This plot shows New England mean latitude over the years from 1995 on, grouped by land or ocean. 
+```{r}
+df_NE %>%
+  group_by(observation_year, is_ocean) %>%
+  filter(observation_year >1995) %>%
+  summarise(mean_latitude = mean(latitude)) %>%
+  ggplot(aes(x = observation_year, y = mean_latitude, group = is_ocean, color = is_ocean)) + geom_line() -> gg9
+gg9
+```
+
+This shows distribution for New England by grouped year for all data, and for only land. 
+```{r}
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  ggplot(aes(x = grouped_year, y = latitude, color = grouped_year)) + geom_boxplot() + labs(title = "New England All", x = "Years", y = "Latitude", color = "Years")
+
+df_GL %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  ggplot(aes(x = grouped_year, y = latitude, color = grouped_year)) + geom_boxplot() + labs(title = "New England - Land Only", x = "Years", y = "Latitude", color = "Years")
+```
+
+This chart shows the distribution of latitudes overall between three time periods, 1998-2000, 2008-2010, and 2018-2020. 
+```{r}
+df1 %>%
+  filter(is_ocean == FALSE) %>%
+  filter(!is.na(grouped_year)) %>%
+  ggplot(aes(x = grouped_year, y = latitude, color = grouped_year)) + geom_boxplot() + labs(title = "All Points")
+```
+
+This chart is a hist of New England land latitudes for all grouped years. 
+```{r}
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  ggplot(aes(x = latitude)) + geom_histogram(fill = "light blue")
+```
+
+This chart is a histogram on latitude for each grouped year of land birds in NE. 
+```{r}
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  filter(grouped_year == '1998-2000') %>%
+  ggplot(aes(x = latitude)) + geom_histogram(fill = "light blue") + labs(title = "1998 - 2000, NE Land")
+
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  filter(grouped_year == '2008-2010') %>%
+  ggplot(aes(x = latitude)) + geom_histogram(fill = "light blue") + labs(title = "2008 - 2010, NE Land")
+
+df_NE %>%
+  filter(!is.na(grouped_year)) %>%
+  filter(is_ocean == FALSE) %>%
+  filter(grouped_year == '2018-2020') %>%
+  ggplot(aes(x = latitude)) + geom_histogram(fill = "light blue") + labs(title = "2018 - 2020, NE Land")
+```
